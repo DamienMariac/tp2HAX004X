@@ -1,5 +1,5 @@
 ---
-title: "TP1"
+title: "TP2"
 author: "MARIAC Damien, DUIGOU Lucien"
 date: "01/12/2026"
 format:
@@ -23,3 +23,110 @@ execute:
   warning: false
   message: false
 ---
+
+# Introduction
+
+
+
+Ce qui est demandé est de donner, pour chaque brebis, une fonction à qui un temps "t" associe le poids de la brebis au temps.
+
+Il agit donc en plus de trier les données, met faire une régression non linéaire ; car le poids ne suit pas une droite.
+
+# Traitements des données
+
+Les données présente beaucoup de outlier due (au manque de serieux ?) à des impressisions lors des meusures. Par exemple plusieurs brebis peuvent etre présente lors d'une seule mesure donnant des mesures de poids trop élevé par rapport à ce qui aurait du etre attendu.
+
+```{r}
+data <- read.csv("data_arles2021.csv",sep = ";")
+data$rdate <- as.Date(data$rdate,format="%d/%m/%Y")
+
+datab1 <- data[data$RFID=="250 017 033 503 634",]
+plot(datab1$rdate,datab1$poids)
+```
+
+Notre approche est donc de classer les outliers via une méthode du K-Means en faisant des groupes de 3. Une pour le surplus de donnée et une pour les donnée proche de 0 consideré comme aberrante.
+
+```{r}
+# variables utilisées pour k-means
+X <- scale(data$poids)
+
+km <- kmeans(X, centers = 3, nstart = 25)  # k = 3 comme prevu
+data$cluster <- km$cluster
+
+# Extraire le sous-jeu: toutes les lignes du cluster 2
+datagroupe <- data[data$cluster == 2, ]
+```
+
+
+```{r}
+# Visualisation des clusters
+datab1 <- data[data$RFID=="250 017 033 503 634",]
+plot(datab1$rdate,datab1$poids, col = datab1$cluster, pch = 16,     xlab = "Index des brebis", ylab = "Poids")
+```
+
+
+# Première méthode : K-nn
+
+```{r}
+datagroupe$datetime <- as.POSIXct(
+  paste(datagroupe$rdate, datagroupe$rheure),
+  format = "%Y-%m-%d %H:%M",
+  tz = "Europe/Paris"
+)
+
+# temps numérique en jours depuis la première mesure pour que ce soir stabme
+datagroupe$t <- as.numeric(datagroupe$datetime - min(datagroupe$datetime, na.rm = TRUE)) / (60*60*24)
+```
+
+
+```{r}
+knn_reg_1d <- function(t_train, y_train, t_test, k = 15){
+  ok <- complete.cases(t_train, y_train)
+  t_train <- t_train[ok]
+  y_train <- y_train[ok]
+
+  n <- length(t_train)
+  if(n == 0) return(rep(NA_real_, length(t_test)))
+  k <- min(k, n)
+
+  y_hat <- numeric(length(t_test))
+
+  for(i in seq_along(t_test)){
+    d <- abs(t_train - t_test[i])   # distance en 1D
+    idx <- order(d)[1:k]            # k plus proches
+    y_hat[i] <- mean(y_train[idx])  # prédiction
+  }
+  y_hat
+}
+```
+
+
+
+```{r}
+rfid_cible <- "250 017 033 503 518"
+datab1 <- datagroupe[datagroupe$RFID == rfid_cible, ]
+
+datab1 <- datab1[complete.cases(datab1[, c("t","poids")]), ]
+datab1 <- datab1[order(datab1$t), ]
+
+t <- datab1$t
+y <- datab1$poids
+
+# grille
+t_grid <- seq(min(t), max(t), length.out = 300)
+
+#k <- 15
+#y_hat <- knn_reg_1d(t, y, t_grid, k = k)
+
+k <- max(3, floor(0.2 * length(t))) # variante
+y_hat <- knn_reg_1d(t, y, t_grid, k = k)
+
+# Plot
+plot(datab1$datetime, y, pch = 16,
+     xlab = "Date", ylab = "Poids")
+
+grid_datetime <- min(datab1$datetime, na.rm = TRUE) + t_grid * 24*3600
+lines(grid_datetime, y_hat, lwd = 2,col="red")
+```
+
+
