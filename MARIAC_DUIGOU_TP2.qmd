@@ -5,7 +5,7 @@ date: "01/12/2026"
 format:
   html:
     theme:
-      light: [cosmo, styles.scss]
+      light: [cosmo]
     toc: true
     toc-depth: 3
     number-sections: true
@@ -26,58 +26,75 @@ execute:
 
 # Introduction
 
+L’objectif est de reconstruire, pour chaque brebis, une fonction
+d'estimation du poids. Comme l’évolution du poids n’est pas strictement linéaire, le problème relève d’une régression non paramétrique sur données temporelles, précédée d’un traitement des observations aberrantes.
 
+# Traitements des données
 
-Ce qui est demandé est de donner, pour chaque brebis, une fonction à qui un temps "t" associe le poids de la brebis au temps.
+Les mesures contiennent des valeurs aberrantes (outliers) dues à des erreurs de mesure ou à des conditions de pesée non représentatives. Ces points peuvent biaiser l’estimation de la tendance et doivent être filtrés avant la modélisation.
 
-Il agit donc en plus de trier les données, met faire une régression non linéaire ; car le poids ne suit pas une droite.
-
-# Traitements des données
-
-Les données présente beaucoup de outlier due (au manque de serieux ?) à des impressisions lors des meusures. Par exemple plusieurs brebis peuvent etre présente lors d'une seule mesure donnant des mesures de poids trop élevé par rapport à ce qui aurait du etre attendu.
+Après import et conversion des dates, on visualise la trajectoire brute d’une brebis afin de caractériser l’ampleur du bruit et la présence d’observations atypiques.
 
 ```{r}
 data <- read.csv("data_arles2021.csv",sep = ";")
 data$rdate <- as.Date(data$rdate,format="%d/%m/%Y")
 
-datab1 <- data[data$RFID=="250 017 033 503 634",]
+datab1 <- data[data$RFID=="250 017 033 503 119",]
 plot(datab1$rdate,datab1$poids)
 ```
 
 Notre approche est donc de classer les outliers via une méthode du K-Means en faisant des groupes de 3. Une pour le surplus de donnée et une pour les donnée proche de 0 consideré comme aberrante.
 
 ```{r}
-# variables utilisées pour k-means
-X <- scale(data$poids)
+set.seed(02062002)
+km <- kmeans(scale(data$poids), centers = 3, nstart = 25)
 
-km <- kmeans(X, centers = 3, nstart = 25)  # k = 3 comme prevu
-data$cluster <- km$cluster
+data$cluster_raw <- km$cluster
 
-# Extraire le sous-jeu: toutes les lignes du cluster 2
+m <- tapply(data$poids, data$cluster_raw, mean)
+ordre <- order(m)  # Pour trier les numero de cluster pour extraire la bonne tendance
+
+data$cluster <- match(data$cluster_raw, ordre)
+
 datagroupe <- data[data$cluster == 2, ]
 ```
 
 
 ```{r}
-# Visualisation des clusters
-datab1 <- data[data$RFID=="250 017 033 503 634",]
+datab1 <- data[data$RFID=="250 017 033 503 119",]
 plot(datab1$rdate,datab1$poids, col = datab1$cluster, pch = 16,     xlab = "Index des brebis", ylab = "Poids")
 ```
 
+La visualisation par couleur confirme la séparation globale en trois niveaux. On observe néanmoins quelques points atypiques encore présents dans le groupe retenu, ce qui peut induire un biais résiduel dans l’estimation de la tendance.
 
 # Première méthode : K-nn
 
+La tendance est ensuite estimée par une approche non paramétrique de type k plus proches voisins (kNN). Pour un instant t, la prédiction est définie comme la moyenne des k observations dont les instants de mesure sont les plus proches de t. Cette méthode permet d’obtenir une courbe flexible sans imposer de forme paramétrique.
+
+Pour appliquer kNN, la date et l’heure sont converties en une variable temporelle continue (en jours), afin de définir une distance temporelle et d’identifier les voisins les plus proches.
+
+
 ```{r}
 datagroupe$datetime <- as.POSIXct(
-  paste(datagroupe$rdate, datagroupe$rheure),
+  paste(format(datagroupe$rdate, "%Y-%m-%d"), trimws(datagroupe$rheure)),
   format = "%Y-%m-%d %H:%M",
   tz = "Europe/Paris"
 )
 
-# temps numérique en jours depuis la première mesure pour que ce soir stabme
-datagroupe$t <- as.numeric(datagroupe$datetime - min(datagroupe$datetime, na.rm = TRUE)) / (60*60*24)
+stopifnot(sum(is.na(datagroupe$datetime)) == 0)
+
+datagroupe$t <- as.numeric(datagroupe$datetime - min(datagroupe$datetime)) / (60*60*24)
+
+rfid <- "250 017 033 503 119"
+datab1 <- datagroupe[datagroupe$RFID == rfid, ]
+
+stopifnot(all(c("datetime","t","poids") %in% names(datab1)))  # doit passer
+datab1 <- datab1[complete.cases(datab1[, c("datetime","t","poids")]), ]
+datab1 <- datab1[order(datab1$t), ]
 ```
 
+
+On construit manuelement la fonction des K-nn. On décide de prendre arbitrairement k = 15.
 
 ```{r}
 knn_reg_1d <- function(t_train, y_train, t_test, k = 15){
@@ -92,20 +109,18 @@ knn_reg_1d <- function(t_train, y_train, t_test, k = 15){
   y_hat <- numeric(length(t_test))
 
   for(i in seq_along(t_test)){
-    d <- abs(t_train - t_test[i])   # distance en 1D
-    idx <- order(d)[1:k]            # k plus proches
-    y_hat[i] <- mean(y_train[idx])  # prédiction
+    d <- abs(t_train - t_test[i])
+    idx <- order(d)[1:k] # k plus proches
+    y_hat[i] <- mean(y_train[idx]) # prédiction
   }
   y_hat
 }
 ```
 
-
+On partitionne dans une grille afin de pouvoir plot la courbe de regression.
 
 ```{r}
-rfid_cible <- "250 017 033 503 518"
-datab1 <- datagroupe[datagroupe$RFID == rfid_cible, ]
-
+datab1 <- datagroupe[datagroupe$RFID == "250 017 033 503 119", ]
 datab1 <- datab1[complete.cases(datab1[, c("t","poids")]), ]
 datab1 <- datab1[order(datab1$t), ]
 
@@ -115,11 +130,9 @@ y <- datab1$poids
 # grille
 t_grid <- seq(min(t), max(t), length.out = 300)
 
-#k <- 15
-#y_hat <- knn_reg_1d(t, y, t_grid, k = k)
-
-k <- max(3, floor(0.2 * length(t))) # variante
+k <- 15
 y_hat <- knn_reg_1d(t, y, t_grid, k = k)
+
 
 # Plot
 plot(datab1$datetime, y, pch = 16,
@@ -130,3 +143,11 @@ lines(grid_datetime, y_hat, lwd = 2,col="red")
 ```
 
 
+La droite de regression à l'air de bien suivre la tendance malgrès de petit biais due aux points mal classé.
+
+
+
+Une idée pour suprimer les outliers serait de refaire tourner l'algorithme des K-means. Mais il se pourrait que pour une brebis donnée, la première iterration de l'algo ai suffit ce qui morcelerais trop les données.
+
+
+Le but ici était de coder les méthodes à la main. Bien que on aurait pu utiliser les méthodes de GAM et de spline afin de mieux lisser les données et diminuer le biais causé par les outliers persistant.
