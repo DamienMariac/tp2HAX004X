@@ -151,3 +151,134 @@ Une idée pour suprimer les outliers serait de refaire tourner l'algorithme des 
 
 
 Le but ici était de coder les méthodes à la main. Bien que on aurait pu utiliser les méthodes de GAM et de spline afin de mieux lisser les données et diminuer le biais causé par les outliers persistant.
+
+# Seconde approche : Estimer la densité
+
+Notre seconde approche consiste à estimer la densité de la variable Poids pour chaque brebis. Une fois ceci fait, nous éliminerons les données dont la densité sera inférieure à un certain seuil que nous fixerons. 
+
+En observant graphiquement les couples (Date,poids) de nos brebis, on constate qu'on peut catégoriser nos données en trois groupes : les données de poids réelles de la brebis, les poids trop élevés ainsi que ceux qui sont proches de zéro. Ces deux derniers pouvant êtres considéres comme des outliers. 
+Ainsi, nous souhaiterions modéliser notre modèle par un mélange de 3 gaussiennes chacune représentant, nous l'espérons, la modélisation de chacun des groupes de données. 
+
+## Estimation du modèle de mélange 
+
+Afin d'estimer notre modèle de mélange gaussien, nous allons procéder par algorithme EM que voici : 
+```{r}
+EM=function(data, K=3, max_iter=100, tol=1e-6){
+  ts=data[!is.na(data)]
+  n=length(ts)
+
+  mu_k=as.numeric(quantile(ts,probs=seq(0.25, 0.75, length.out=K)))
+  sigma_k=rep(sd(ts), K)
+  eps_k=rep(1/K, K)
+
+  loglik_old=-Inf
+
+  for (iter in 1:max_iter){
+
+    # Etape E
+    dens=sapply(1:K, function(k)
+      eps_k[k]*dnorm(ts, mu_k[k], sigma_k[k])
+    )
+
+    dens_sum=rowSums(dens)
+    dens_sum[dens_sum<tol]=tol
+
+    gamma=dens/dens_sum
+
+    # Etape M
+    N_k=colSums(gamma)
+
+    eps_k=N_k/n
+    mu_k=colSums(gamma*matrix(ts,n,K))/N_k
+    sigma_k=sqrt(colSums(gamma*sweep(matrix(ts,n,K), 2, mu_k, FUN="-")^2)/N_k)
+
+    sigma_k[sigma_k<tol]=tol
+
+    loglik=sum(log(dens_sum))
+
+    if (abs(loglik - loglik_old)<tol) break
+    loglik_old=loglik
+  }
+
+  list(eps=eps_k, mu=mu_k, sigma=sigma_k, loglik=loglik)
+}
+```
+
+Pour notre jeu de données test, cet algorithme renvoie les paramètres suivant : 
+```{r}
+datab1 <- data[data$RFID=="250 017 033 503 119",]
+param=EM(data=datab1$poids)
+param
+```
+
+## Estimation de la densité 
+
+Avec les paramètres précédemment calculés via l'algorithme EM, nous allons dorénavant donner un estimateur de la densité de nos données : 
+```{r}
+dens=function(x){
+  d=c()
+  l=length(x)
+  for (i in 1:l){
+    s=c()
+    for (j in 1:3){
+      s=c(s,param$eps[j]*dnorm(x[i],param$mu[j],param$sigma[j]))
+    }
+    d=c(d,sum(s))
+  }
+  return(d)
+}
+
+d=dens(datab1$poids)
+```
+
+## Elimination des outliers 
+
+Maintenant que nous avons un estimateur de la densité du poids en fonction du temps, nous allons éliminer les outliers en attribuant une valeur NA lorsque que l'une de nos données a une densité faible pour la loi du mélange gaussien. Ensuite, nous traiterons les NA par algorithme des k plus proches voisins (knn).
+
+```{r}
+clean=function(x,seuil=0.023){
+  d=dens(x)
+  l=length(x)
+  clean=rep(NA,l)
+  for (i in 1:l){
+    if (d[i]>= seuil){
+      clean[i]=x[i]
+    }
+  }
+  return(clean)
+}
+```
+
+A $10^{-3}$ près, nous avons évalué le seuil optimum à 0.023. En effet, avec un seuil à 0.022, nous avions encore des valeurs trop élevées qui subsistaient après nettoyage des valeurs abberantes. 
+```{r}
+clean_data1=clean(datab1$poids,seuil=0.022)
+clean_data2=clean(datab1$poids)
+plot(datab1$rdate,clean_data1,col='blue',main="Comparaison des données nettoyées avec les seuils 0.022 et 0.023",xlab="Date",ylab="Poids")
+points(datab1$rdate,clean_data2,col="red")
+legend("topright",legend=c("seuil à 0.022","seuil à 0.023"),col=c("blue","red"),lty=1,cex=0.75,bty="n")
+```
+
+On voit qu'effectivement, pour les valeurs que nous jugons correctes, les données sont confondues. En revanche, pour le seuil à 0.069, quelques outliers persistent. Ce qui confirme que le seuil à 0.07 est le seuil optimum à $10^{-3}$ près. On affichera en bleu les données qu'on garde et en rouge les données que nous avons retiré.
+
+On peut afficher graphiquement la comparaison entre les données initiales et les données nettoyées :
+```{r}
+plot(datab1$rdate,datab1$poids,col='red',main="Comparaison entre les données initiales et les données nettoyées",xlab="Date",ylab="Poids")
+points(datab1$rdate, clean_data2, col='blue')
+legend("topright",legend=c("Données initiales","données nettoyées"),col=c("red","blue"),lty=1,cex=0.75,bty="n")
+```
+
+Malgré que le seuil ait été choisi de manière optimal, nous remarquons qu'avec cette aproche, nous avons retiré certaines données réalistes. Comme perspective d'amélioration, nous pouvons nous demander si nous aurions pas pu prendre un seuil plus précis, ou bien nous aurions pu choisir une autre méthode d'estimation de la densité, par exemple en prenant un estimateur à noyau. à noter que le choix du seuil ainsi que les paramètres de notre modèle seront différent selon la brebis considérée dans l'étude. 
+
+## Régression 
+
+maintenant que nous avons nos données nettoyées, nous pouvons nous attaquer à la régression de celles-ci, afin de modéiser le poids en fonction de pesées dans le temps. 
+Pour ce faire, nous allons utiliser l'algorithme des plus proches voisins, utilisé dans la première partie de notre étude : 
+
+```{r}
+
+```
+
+
+
+
+
