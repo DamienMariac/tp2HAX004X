@@ -24,12 +24,15 @@ execute:
   message: false
 ---
 
-# Introduction
+
+# Contexte
 
 L’objectif est de reconstruire, pour chaque brebis, une fonction
 d'estimation du poids. Comme l’évolution du poids n’est pas strictement linéaire, le problème relève d’une régression non paramétrique sur données temporelles, précédée d’un traitement des observations aberrantes.
 
-# Traitements des données
+# Première approche
+
+## Traitements des données
 
 Les mesures contiennent des valeurs aberrantes (outliers) dues à des erreurs de mesure ou à des conditions de pesée non représentatives. Ces points peuvent biaiser l’estimation de la tendance et doivent être filtrés avant la modélisation.
 
@@ -67,7 +70,48 @@ plot(datab1$rdate,datab1$poids, col = datab1$cluster, pch = 16,     xlab = "Inde
 
 La visualisation par couleur confirme la séparation globale en trois niveaux. On observe néanmoins quelques points atypiques encore présents dans le groupe retenu, ce qui peut induire un biais résiduel dans l’estimation de la tendance.
 
-# Première méthode : K-nn
+On effectue un deuxième traitement en effectuant un filtre de Hampel.
+En effet, le filtre de Hampel détecte les valeurs aberrantes en comparant chaque point à la médiane d’une fenêtre glissante autour de lui, et en le déclarant outlier s’il s’écarte de plus de k fois l’écart robuste calculé localement.
+
+```{r}
+hampel_flag <- function(x, k = 5, t0 = 3){
+  n <- length(x)
+  flag <- rep(FALSE, n)
+
+  for(i in seq_len(n)){
+    a <- max(1, i - k)
+    b <- min(n, i + k)
+    w <- x[a:b]
+    w <- w[is.finite(w)]
+
+    if(length(w) < 3 || !is.finite(x[i])) next
+
+    med <- median(w)
+    s <- mad(w, constant = 1.4826)
+    if(!is.finite(s) || s == 0) next
+
+    flag[i] <- abs(x[i] - med) > t0 * s
+  }
+  flag
+}
+```
+
+```{r}
+datab1 <- datab1[order(datab1$rdate), ]
+flag <- hampel_flag(datab1$poids, k = 5, t0 = 3)
+
+datab1_clean <- datab1[!flag, ]
+
+# visu : points supprimés en rouge
+plot(datab1$rdate, datab1$poids, pch=16, cex=.7, xlab="Date", ylab="Poids",
+     main="2eme traitenemt avec filtre de Hampel (rouge = outliers)")
+points(datab1$rdate[flag], datab1$poids[flag], col="red", pch=16)
+
+```
+
+
+
+## K-nn pour une fonction de regression
 
 La tendance est ensuite estimée par une approche non paramétrique de type k plus proches voisins (kNN). Pour un instant t, la prédiction est définie comme la moyenne des k observations dont les instants de mesure sont les plus proches de t. Cette méthode permet d’obtenir une courbe flexible sans imposer de forme paramétrique.
 
@@ -97,49 +141,32 @@ datab1 <- datab1[order(datab1$t), ]
 On construit manuelement la fonction des K-nn. On décide de prendre arbitrairement k = 15.
 
 ```{r}
-knn_reg_1d <- function(t_train, y_train, t_test, k = 15){
-  ok <- complete.cases(t_train, y_train)
-  t_train <- t_train[ok]
-  y_train <- y_train[ok]
+knn <- function(t, y, k = 15){
+  ok <- complete.cases(t, y)
+  t <- t[ok]; y <- y[ok]
 
-  n <- length(t_train)
-  if(n == 0) return(rep(NA_real_, length(t_test)))
-  k <- min(k, n)
+  k <- min(k, length(t))
+  if(k == 0) return(rep(NA_real_, length(y)))
 
-  y_hat <- numeric(length(t_test))
-
-  for(i in seq_along(t_test)){
-    d <- abs(t_train - t_test[i])
-    idx <- order(d)[1:k] # k plus proches
-    y_hat[i] <- mean(y_train[idx]) # prédiction
-  }
-  y_hat
+  sapply(seq_along(t), function(i){
+    mean(y[order(abs(t - t[i]))[1:k]])
+  })
 }
 ```
 
 On partitionne dans une grille afin de pouvoir plot la courbe de regression.
 
 ```{r}
-datab1 <- datagroupe[datagroupe$RFID == "250 017 033 503 119", ]
-datab1 <- datab1[complete.cases(datab1[, c("t","poids")]), ]
-datab1 <- datab1[order(datab1$t), ]
-
 t <- datab1$t
 y <- datab1$poids
 
-# grille
-t_grid <- seq(min(t), max(t), length.out = 300)
 
-k <- 15
-y_hat <- knn_reg_1d(t, y, t_grid, k = k)
+y_hat <- knn(t, y, k = 15)
 
+ord <- order(t)
 
-# Plot
-plot(datab1$datetime, y, pch = 16,
-     xlab = "Date", ylab = "Poids")
-
-grid_datetime <- min(datab1$datetime, na.rm = TRUE) + t_grid * 24*3600
-lines(grid_datetime, y_hat, lwd = 2,col="red")
+plot(datab1$datetime, y, pch = 16, cex = 0.7, xlab = "Date", ylab = "Poids",main = "lissage kNN")
+lines(datab1$datetime[ord], y_hat[ord], lwd = 2,col="red")
 ```
 
 
@@ -154,14 +181,14 @@ Le but ici était de coder les méthodes à la main. Bien que on aurait pu utili
 
 # Seconde approche : Estimer la densité
 
-Notre seconde approche consiste à estimer la densité de la variable Poids pour chaque brebis. Une fois ceci fait, nous éliminerons les données dont la densité sera inférieure à un certain seuil que nous fixerons. 
+Notre seconde approche consiste à estimer la densité de la variable Poids pour chaque brebis. Une fois ceci fait, nous éliminerons les données dont la densité sera inférieure à un certain seuil que nous fixerons.
 
-En observant graphiquement les couples (Date,poids) de nos brebis, on constate qu'on peut catégoriser nos données en trois groupes : les données de poids réelles de la brebis, les poids trop élevés ainsi que ceux qui sont proches de zéro. Ces deux derniers pouvant êtres considéres comme des outliers. 
-Ainsi, nous souhaiterions modéliser notre modèle par un mélange de 3 gaussiennes chacune représentant, nous l'espérons, la modélisation de chacun des groupes de données. 
+En observant graphiquement les couples (Date,poids) de nos brebis, on constate qu'on peut catégoriser nos données en trois groupes : les données de poids réelles de la brebis, les poids trop élevés ainsi que ceux qui sont proches de zéro. Ces deux derniers pouvant êtres considéres comme des outliers.
+Ainsi, nous souhaiterions modéliser notre modèle par un mélange de 3 gaussiennes chacune représentant, nous l'espérons, la modélisation de chacun des groupes de données.
 
-## Estimation du modèle de mélange 
+## Estimation du modèle de mélange
 
-Afin d'estimer notre modèle de mélange gaussien, nous allons procéder par algorithme EM que voici : 
+Afin d'estimer notre modèle de mélange gaussien, nous allons procéder par algorithme EM que voici :
 ```{r}
 EM=function(data, K=3, max_iter=100, tol=1e-6){
   ts=data[!is.na(data)]
@@ -204,16 +231,16 @@ EM=function(data, K=3, max_iter=100, tol=1e-6){
 }
 ```
 
-Pour notre jeu de données test, cet algorithme renvoie les paramètres suivant : 
+Pour notre jeu de données test, cet algorithme renvoie les paramètres suivant :
 ```{r}
 datab1 <- data[data$RFID=="250 017 033 503 119",]
 param=EM(data=datab1$poids)
 param
 ```
 
-## Estimation de la densité 
+## Estimation de la densité
 
-Avec les paramètres précédemment calculés via l'algorithme EM, nous allons dorénavant donner un estimateur de la densité de nos données : 
+Avec les paramètres précédemment calculés via l'algorithme EM, nous allons dorénavant donner un estimateur de la densité de nos données :
 ```{r}
 dens=function(x){
   d=c()
@@ -231,7 +258,7 @@ dens=function(x){
 d=dens(datab1$poids)
 ```
 
-## Elimination des outliers 
+## Elimination des outliers
 
 Maintenant que nous avons un estimateur de la densité du poids en fonction du temps, nous allons éliminer les outliers en attribuant une valeur NA lorsque que l'une de nos données a une densité faible pour la loi du mélange gaussien. Ensuite, nous traiterons les NA par algorithme des k plus proches voisins (knn).
 
@@ -249,7 +276,7 @@ clean=function(x,seuil=0.023){
 }
 ```
 
-A $10^{-3}$ près, nous avons évalué le seuil optimum à 0.023. En effet, avec un seuil à 0.022, nous avions encore des valeurs trop élevées qui subsistaient après nettoyage des valeurs abberantes. 
+A $10^{-3}$ près, nous avons évalué le seuil optimum à 0.023. En effet, avec un seuil à 0.022, nous avions encore des valeurs trop élevées qui subsistaient après nettoyage des valeurs abberantes.
 ```{r}
 clean_data1=clean(datab1$poids,seuil=0.022)
 clean_data2=clean(datab1$poids)
@@ -267,12 +294,12 @@ points(datab1$rdate, clean_data2, col='blue')
 legend("topright",legend=c("Données initiales","données nettoyées"),col=c("red","blue"),lty=1,cex=0.75,bty="n")
 ```
 
-Malgré que le seuil ait été choisi de manière optimal, nous remarquons qu'avec cette aproche, nous avons retiré certaines données réalistes. Comme perspective d'amélioration, nous pouvons nous demander si nous aurions pas pu prendre un seuil plus précis, ou bien nous aurions pu choisir une autre méthode d'estimation de la densité, par exemple en prenant un estimateur à noyau. à noter que le choix du seuil ainsi que les paramètres de notre modèle seront différent selon la brebis considérée dans l'étude. 
+Malgré que le seuil ait été choisi de manière optimal, nous remarquons qu'avec cette aproche, nous avons retiré certaines données réalistes. Comme perspective d'amélioration, nous pouvons nous demander si nous aurions pas pu prendre un seuil plus précis, ou bien nous aurions pu choisir une autre méthode d'estimation de la densité, par exemple en prenant un estimateur à noyau. à noter que le choix du seuil ainsi que les paramètres de notre modèle seront différent selon la brebis considérée dans l'étude.
 
-## Régression 
+## Régression
 
-maintenant que nous avons nos données nettoyées, nous pouvons nous attaquer à la régression de celles-ci, afin de modéiser le poids en fonction de pesées dans le temps. 
-Pour ce faire, nous allons utiliser l'algorithme des plus proches voisins, utilisé dans la première partie de notre étude : 
+maintenant que nous avons nos données nettoyées, nous pouvons nous attaquer à la régression de celles-ci, afin de modéiser le poids en fonction de pesées dans le temps.
+Pour ce faire, nous allons utiliser l'algorithme des plus proches voisins, utilisé dans la première partie de notre étude :
 
 ```{r}
 
