@@ -285,7 +285,7 @@ points(datab1$rdate,clean_data2,col="red")
 legend("topright",legend=c("seuil à 0.022","seuil à 0.023"),col=c("blue","red"),lty=1,cex=0.75,bty="n")
 ```
 
-On voit qu'effectivement, pour les valeurs que nous jugons correctes, les données sont confondues. En revanche, pour le seuil à 0.069, quelques outliers persistent. Ce qui confirme que le seuil à 0.07 est le seuil optimum à $10^{-3}$ près. On affichera en bleu les données qu'on garde et en rouge les données que nous avons retiré.
+On voit qu'effectivement, pour les valeurs que nous jugons correctes, les données sont confondues. En revanche, pour le seuil à 0.022, quelques outliers persistent. Ce qui confirme que le seuil à 0.023 est le seuil optimum à $10^{-3}$ près. 
 
 On peut afficher graphiquement la comparaison entre les données initiales et les données nettoyées :
 ```{r}
@@ -294,16 +294,51 @@ points(datab1$rdate, clean_data2, col='blue')
 legend("topright",legend=c("Données initiales","données nettoyées"),col=c("red","blue"),lty=1,cex=0.75,bty="n")
 ```
 
-Malgré que le seuil ait été choisi de manière optimal, nous remarquons qu'avec cette aproche, nous avons retiré certaines données réalistes. Comme perspective d'amélioration, nous pouvons nous demander si nous aurions pas pu prendre un seuil plus précis, ou bien nous aurions pu choisir une autre méthode d'estimation de la densité, par exemple en prenant un estimateur à noyau. à noter que le choix du seuil ainsi que les paramètres de notre modèle seront différent selon la brebis considérée dans l'étude.
+Malgré que le seuil ait été choisi de manière optimal, nous remarquons qu'avec cette aproche, nous avons retiré certaines données réalistes, ce qui est logique car si on raisonne en terme de fréquence, certaines données réalistes ont une fréquence d'apparition équivalente à certains outliers. Comme perspective d'amélioration, nous pouvons nous demander si nous aurions pas pu prendre un seuil plus précis, ou bien nous aurions pu choisir une autre méthode d'estimation de la densité, par exemple en prenant un estimateur à noyau. à noter que le choix du seuil ainsi que les paramètres de notre modèle seront différent selon la brebis considérée dans l'étude. Ce qui oblige à chercher manuellement le seuil optimal chaque fois qu'on change de brebis.
 
 ## Régression
 
-maintenant que nous avons nos données nettoyées, nous pouvons nous attaquer à la régression de celles-ci, afin de modéiser le poids en fonction de pesées dans le temps.
-Pour ce faire, nous allons utiliser l'algorithme des plus proches voisins, utilisé dans la première partie de notre étude :
+maintenant que nous avons nos données nettoyées, nous pouvons nous attaquer à la régression de celles-ci, afin de modéiser le poids en fonction des pesées dans le temps.
+Pour ce faire, nous allons utiliser l'algorithme des plus proches voisins, comme dans la première partie de notre étude :
 
 ```{r}
+data_time <- data.frame(
+  datetime = as.POSIXct(
+    paste(format(datab1$rdate, "%Y-%m-%d"), trimws(datab1$rheure)),
+    format = "%Y-%m-%d %H:%M",
+    tz = "Europe/Paris"
+  )
+)
 
+knn2=function(time, value, k = 5, fun = mean){
+  n=length(value)
+  res=numeric(n)
+  
+  for (i in seq_len(n)){
+    d=abs(difftime(time, time[i], units = "secs"))
+    d[i]=Inf
+
+    ok=which(!is.na(value))
+    nn=ok[order(d[ok])][1:k]
+    
+    res[i]=fun(value[nn], na.rm = TRUE)
+  }
+  
+  res
+}
+
+Y_hat=knn2(time=data_time$datetime,value=clean_data2,k=15)
+
+plot(datab1$rdate, datab1$poids,main="Régression du poids jugé bien mesuré en fonction du temps", xlab="Date", ylab="Poids")
+lines(datab1$rdate, Y_hat, col="red",type='l')
+
+plot(datab1$rdate, clean_data2,main="Régression zoomée sur les poids jugés bien mesurés", xlab="Date", ylab="Poids")
+lines(datab1$rdate, Y_hat, col="red",type='l')
 ```
+
+### Observation 
+
+On voit que la courbe rouge suit assez bien la tendance des mesures du poids que nous avons évalué comme bonnes. De plus, grâce à la réalisation de nos fonctions précédente, la régression réalisée ignore la majorité des valeurs abérrantes mesurées dans les données initiales.
 
 
 
